@@ -53,30 +53,9 @@ mnist-mlp-zybo-accelerator/
 
 ---
 
-## Step 1 — Train and export weights
+## Step 1 — Recreate the Vivado project
 
-```bash
-cd training
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/Mac:
-source .venv/bin/activate
-
-pip install -r requirements.txt
-python train_and_export.py
-```
-
-This trains the MLP on MNIST and writes:
-- `training/outputs/coe/` — quantized weight `.coe` files and `scales.txt`
-- `hardware/vivado/src/rtl/mlp_params.vh` — requantization shift parameters for the RTL
-- `hardware/vitis/mlp_accelerator_app/include/weights_biases.h` — C header for BRAM loading
-
-> Re-run this step any time you retrain. After updating `mlp_params.vh` you must re-synthesise in Vivado.
-
----
-
-## Step 2 — Recreate the Vivado project
+The repository includes pre-trained weights in `hardware/vitis/mlp_accelerator_app/include/weights_biases.h`. **Training is not required** — skip to Step 1 and use the committed weights as-is.
 
 1. Open **Vivado 2025.2.1**.
 2. In the Tcl console, `cd` to the vivado directory and source the script:
@@ -90,7 +69,7 @@ This recreates the full project — RTL sources, constraints, and block design �
 
 ---
 
-## Step 3 — Synthesise, implement, and generate bitstream
+## Step 2 — Synthesise, implement, and generate bitstream
 
 In Vivado:
 
@@ -101,7 +80,7 @@ In Vivado:
 
 ---
 
-## Step 4 — Create the Vitis platform
+## Step 3 — Create the Vitis platform
 
 1. Open **Vitis 2025.2.1**, set workspace to `hardware/vitis/`.
 2. Create a new platform component:
@@ -112,7 +91,7 @@ In Vivado:
 
 ---
 
-## Step 5 — Build the firmware
+## Step 4 — Build the firmware
 
 1. In the same Vitis workspace, add the existing app component:
    - Point Vitis at `hardware/vitis/mlp_accelerator_app/`
@@ -121,11 +100,12 @@ In Vivado:
 
 ---
 
-## Step 6 — Program the board
+## Step 5 — Program the board
 
 1. Connect the Zybo Z7-10 over USB (JTAG + UART).
 2. In Vitis, in the **Flow** panel select `mlp_accelerator_app` and click **Run** (or the debug icon).
-   - If Vitis prompts **"Select a launch configuration"**, click **Create launch configuration**. Accept the defaults (target: `ps7_cortexa9_0`, program bitstream: enabled) and click Finish. Vitis programs the bitstream and loads the ELF automatically.
+   - If Vitis prompts **"Select a launch configuration"**, click **Create launch configuration**. Accept the defaults (target: `ps7_cortexa9_0`, program bitstream: enabled) and click Finish.
+   - Vitis programs the bitstream, initialises the PS, and loads the ELF onto the board.
 3. Open a serial terminal at **115200 baud** on the board's UART port.
 4. You should see:
 ```
@@ -135,9 +115,11 @@ Send frame: 4-byte header "IMG1" + 784 grayscale bytes.
 READY
 ```
 
+The board is now waiting. **Running the app in Vitis only loads the firmware — it does not perform any inference.** Inference is triggered by sending an image from the PC in Step 6.
+
 ---
 
-## Step 7 — Run inference from the PC
+## Step 6 — Run inference from the PC
 
 ```bash
 cd host
@@ -150,7 +132,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Send an image:
+Send any 28×28 PNG to the board:
+
+```bash
+python send_image.py <path/to/image.png> --port COM4
+```
+
+For example, using one of the included test images:
 
 ```bash
 python send_image.py ../data/test_images/mnist_0_label_7.png --port COM4
@@ -182,7 +170,7 @@ To verify the integer arithmetic matches the FPGA before flashing:
 
 ```bash
 cd host
-python int_infer_check.py ../data/test_images/mnist_0_label_7.png
+python int_infer_check.py <path/to/image.png>
 ```
 
 This mirrors `mlp_engine.v` exactly in Python — same INT8 MACs, same requantization shifts, same argmax.
@@ -204,3 +192,28 @@ This mirrors `mlp_engine.v` exactly in Python — same INT8 MACs, same requantiz
 | `0x00` | Write | Control — write `0x1` to start inference |
 | `0x04` | Read | Status — bit 0: done (read-to-clear), bit 1: busy |
 | `0x08` | Read | Result — bits [3:0] predicted class (0–9) |
+
+---
+
+## Optional — Retrain the model
+
+> **WARNING:** Running the training script overwrites `hardware/vitis/mlp_accelerator_app/include/weights_biases.h` and `hardware/vivado/src/rtl/mlp_params.vh` with newly trained values. This will replace the committed weights in the repository. Only do this if you intentionally want to retrain from scratch.
+
+```bash
+cd training
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
+pip install -r requirements.txt
+python train_and_export.py
+```
+
+This trains the MLP on MNIST and writes:
+- `training/outputs/coe/` — quantized weight `.coe` files and `scales.txt`
+- `hardware/vivado/src/rtl/mlp_params.vh` — requantization shift parameters for the RTL
+- `hardware/vitis/mlp_accelerator_app/include/weights_biases.h` — C header for BRAM loading
+
+After retraining, rebuild the firmware (Step 4) and re-flash the board (Step 5). If `mlp_params.vh` changed, you must also re-synthesise in Vivado (Steps 1–2) before rebuilding.
