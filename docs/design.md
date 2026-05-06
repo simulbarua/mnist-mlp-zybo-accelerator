@@ -1,5 +1,31 @@
 # Design Notes — MNIST MLP Zybo Accelerator
 
+## Contents
+
+- [System overview](#system-overview)
+- [1. Network architecture](#1-network-architecture)
+- [2. Training and quantization](#2-training-and-quantization)
+  - [2.1 Float training](#21-float-training)
+  - [2.2 Post-training quantization](#22-post-training-quantization-ptq)
+  - [2.3 Input quantization](#23-input-quantization)
+  - [2.4 Inter-layer requantization](#24-inter-layer-requantization)
+  - [2.5 Exported artifacts](#25-exported-artifacts)
+- [3. Hardware design](#3-hardware-design)
+  - [3.1 Block design](#31-block-design)
+  - [3.2 AXI address map](#32-axi-address-map)
+  - [3.3 RTL modules](#33-rtl-modules)
+  - [3.4 BRAM memory layout](#34-bram-memory-layout-param-bram)
+  - [3.5 Timing](#35-timing)
+- [4. Firmware](#4-firmware)
+  - [4.1 Boot sequence](#41-boot-sequence-mainc)
+  - [4.2 UART protocol](#42-uart-protocol)
+  - [4.3 Input normalization](#43-input-normalization-ps-side)
+  - [4.4 Inference handshake](#44-inference-handshake)
+- [5. Host scripts](#5-host-scripts)
+- [6. Retrain workflow](#6-retrain-workflow)
+
+---
+
 ## System overview
 
 The system classifies 28×28 MNIST digits using a three-layer fully-connected (MLP) network accelerated in the Zybo Z7-10 FPGA fabric. The ARM Cortex-A9 (PS) handles UART communication and BRAM loading; the PL fabric runs the fixed-point MAC engine.
