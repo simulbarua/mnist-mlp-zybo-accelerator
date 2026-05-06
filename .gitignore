@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+tools/.venv/
+
+# Training data and generated model artifacts
+training/data/
+*.pth
+
+# Vivado generated files
+hardware/vivado/*.xpr
+hardware/vivado/*.xsa
+*.srcs/
+*.runs/
+*.cache/
+*.hw/
+*.sim/
+*.ip_user_files/
+*.gen/
+*.jou
+*.log
+*.str
+*.bit
+*.bin
+*.ltx
+*.hwdef
+
+# Vitis generated files
+hardware/vitis/zybo_z710_platform/
+hardware/vitis/.rigel_lopper/
+hardware/vitis/mlp_accelerator_app/build/
+hardware/vitis/mlp_accelerator_app/_ide/
+hardware/vitis/mlp_accelerator_app/compile_commands.json
+hardware/vitis/mlp_accelerator_app/src/compile_commands.json
+hardware/vitis/mlp_accelerator_app/src/.clangd
+hardware/vitis/mlp_accelerator_app/.cache/
+hardware/vitis/mlp_accelerator_app/src/.cache/
+hardware/vitis/_ide/
+.metadata/
+Debug/
+Release/
+_system/
+*.elf
+*.map
+*.o
+*.d
+
+# Host test data (use data/test_images/ instead)
+host/test_images/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
