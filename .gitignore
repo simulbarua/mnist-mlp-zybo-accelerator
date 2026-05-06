@@ -23,6 +23,7 @@ hardware/vivado/*.xsa
 *.log
 *.str
 *.bit
+!hardware/vitis/mlp_accelerator_app/_ide/bitstream/*.bit
 *.bin
 *.ltx
 *.hwdef
@@ -31,7 +32,9 @@ hardware/vivado/*.xsa
 hardware/vitis/zybo_z710_platform/
 hardware/vitis/.rigel_lopper/
 hardware/vitis/mlp_accelerator_app/build/
-hardware/vitis/mlp_accelerator_app/_ide/
+hardware/vitis/mlp_accelerator_app/_ide/logs/
+hardware/vitis/mlp_accelerator_app/_ide/.wsdata/
+# launch.json, bitstream/, and psinit/ are tracked (needed to run without re-synthesising)
 hardware/vitis/mlp_accelerator_app/compile_commands.json
 hardware/vitis/mlp_accelerator_app/src/compile_commands.json
 hardware/vitis/mlp_accelerator_app/src/.clangd
