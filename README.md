@@ -125,7 +125,7 @@ In Vivado:
 
 1. Connect the Zybo Z7-10 over USB (JTAG + UART).
 2. In Vitis, in the **Flow** panel select `mlp_accelerator_app` and click **Run** (or the debug icon).
-   - If Vitis prompts **"Select a launch configuration"**, choose `mlp_accelerator_app_app_hw_1` from the dropdown. This configuration is pre-committed in `hardware/vitis/mlp_accelerator_app/_ide/launch.json` and programs the bitstream, runs FSBL, then loads the ELF automatically.
+   - If Vitis prompts **"Select a launch configuration"**, click **Create launch configuration**. Accept the defaults (target: `ps7_cortexa9_0`, program bitstream: enabled) and click Finish. Vitis programs the bitstream and loads the ELF automatically.
 3. Open a serial terminal at **115200 baud** on the board's UART port.
 4. You should see:
 ```
