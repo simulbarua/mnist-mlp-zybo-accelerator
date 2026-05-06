@@ -135,13 +135,13 @@ pip install -r requirements.txt
 Send any 28×28 PNG to the board:
 
 ```bash
-python send_image.py <path/to/image.png> --port COM4
+python send_image.py <path/to/image.png> --port COM4 --no-wait-ready
 ```
 
 For example, using one of the included test images:
 
 ```bash
-python send_image.py ../data/test_images/mnist_0_label_7.png --port COM4
+python send_image.py ../data/test_images/mnist_0_label_7.png --port COM4 --no-wait-ready
 ```
 
 Expected output:
