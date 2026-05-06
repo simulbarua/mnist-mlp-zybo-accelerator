@@ -7,6 +7,8 @@ Hardware MLP inference accelerator for MNIST digit classification on the Digilen
 **Throughput:** ~0.40 ms per inference at 100 MHz  
 **Interface:** UART — send a 28×28 image from a PC, receive the predicted class
 
+For architecture details, quantization math, BRAM layout, and firmware design see [docs/design.md](docs/design.md).
+
 ---
 
 ## Repository structure
