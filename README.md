@@ -106,16 +106,7 @@ In Vivado:
 2. In Vitis, in the **Flow** panel select `mlp_accelerator_app` and click **Run** (or the debug icon).
    - If Vitis prompts **"Select a launch configuration"**, click **Create launch configuration**. Accept the defaults (target: `ps7_cortexa9_0`, program bitstream: enabled) and click Finish.
    - Vitis programs the bitstream, initialises the PS, and loads the ELF onto the board.
-3. Open a serial terminal at **115200 baud** on the board's UART port.
-4. You should see:
-```
-BRAM loaded OK.
-UART inference mode ready.
-Send frame: 4-byte header "IMG1" + 784 grayscale bytes.
-READY
-```
-
-The board is now waiting. **Running the app in Vitis only loads the firmware — it does not perform any inference.** Inference is triggered by sending an image from the PC in Step 6.
+3. Once Vitis finishes, the board is ready. **Do not open a serial terminal** — `send_image.py` uses the same UART port and will fail if another process holds it open. Proceed directly to Step 6 to send images.
 
 ---
 
