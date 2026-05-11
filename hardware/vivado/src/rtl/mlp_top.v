@@ -7,13 +7,15 @@
 // =============================================================================
 // mlp_top.v
 //
-// Top-level wrapper for the MLP accelerator on Zybo Z7-10.
+// Top-level wrapper for the 4-bank parallel MLP accelerator on Zybo Z7-10.
 // Instantiates:
 //   - axilite_ctrl  : AXI4-Lite slave (PS control/status interface)
-//   - mlp_engine    : serial MAC inference engine
+//   - mlp_engine    : 4-neuron-parallel MAC inference engine
 //
-// The Param BRAM and Input BRAM Port B signals are brought to top-level ports
-// so they can be wired in the Vivado block diagram to the BRAM primitives.
+// Param BRAM Port B signals are split across 4 banks, each brought to
+// top-level ports so the Vivado block diagram can wire them independently
+// to the 4 BRAM primitives.  All 4 banks share the same address and enable;
+// each returns its own 32-bit read data word.
 //
 // Busy signal: SR latch — set on start pulse, cleared on done pulse.
 // =============================================================================
@@ -46,15 +48,21 @@ module mlp_top (
     output wire        s_axi_rvalid,
     input  wire        s_axi_rready,
 
-    // ── Param BRAM — Port B (byte-wide, read-only) ────────────────────────────
-    output wire [15:0] param_bram_addr,
+    // ── Param BRAM — 4 banks, Port B (read-only) ─────────────────────────────
+    // All 4 banks receive the same address and enable each cycle.
+    // Each returns its own 32-bit word (weights/bias for one of the 4
+    // parallel neurons being computed).
+    output wire [13:0] param_bram_addr,
     output wire        param_bram_en,
-    input  wire [31:0]  param_bram_rdata,
+    input  wire [31:0] param_bram0_rdata,
+    input  wire [31:0] param_bram1_rdata,
+    input  wire [31:0] param_bram2_rdata,
+    input  wire [31:0] param_bram3_rdata,
 
-    // ── Input BRAM — Port B (byte-wide, read-only) ────────────────────────────
+    // ── Input BRAM — Port B (read-only) ──────────────────────────────────────
     output wire [9:0]  input_bram_addr,
     output wire        input_bram_en,
-    input  wire [31:0]  input_bram_rdata
+    input  wire [31:0] input_bram_rdata
 );
 
 // ── Internal wires ────────────────────────────────────────────────────────────
@@ -106,25 +114,28 @@ axilite_ctrl u_ctrl (
     .result         (result_w)
 );
 
-// ── MLP inference engine ─────────────────────────────────────────────────────
+// ── MLP inference engine (4-neuron parallel) ─────────────────────────────────
 mlp_engine #(
     .FC1_REQ_SHIFT (`MLP_REQ_SHIFT_FC1),
     .FC2_REQ_SHIFT (`MLP_REQ_SHIFT_FC2)
 ) u_engine (
-    .clk            (s_axi_aclk),
-    .rst_n          (s_axi_aresetn),
+    .clk             (s_axi_aclk),
+    .rst_n           (s_axi_aresetn),
 
-    .start          (start_w),
-    .done           (done_w),
-    .result         (result_w),
+    .start           (start_w),
+    .done            (done_w),
+    .result          (result_w),
 
-    .param_addr     (param_bram_addr),
-    .param_en       (param_bram_en),
-    .param_rdata    (param_bram_rdata),
+    .param_addr      (param_bram_addr),
+    .param_en        (param_bram_en),
+    .param0_rdata    (param_bram0_rdata),
+    .param1_rdata    (param_bram1_rdata),
+    .param2_rdata    (param_bram2_rdata),
+    .param3_rdata    (param_bram3_rdata),
 
-    .input_addr     (input_bram_addr),
-    .input_en       (input_bram_en),
-    .input_rdata    (input_bram_rdata)
+    .input_addr      (input_bram_addr),
+    .input_en        (input_bram_en),
+    .input_rdata     (input_bram_rdata)
 );
 
 endmodule

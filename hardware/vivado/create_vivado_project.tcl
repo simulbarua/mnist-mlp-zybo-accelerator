@@ -709,40 +709,19 @@ proc cr_bd_mnist_mlp_accelerator { parentCell } {
   # Create instance: proc_sys_reset_0, and set properties
   set proc_sys_reset_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_0 ]
 
-  # Create instance: smartconnect_0, and set properties
+  # Create instance: smartconnect_0
+  # NUM_MI=6: param banks 0-3 (M00-M03), input BRAM (M04), MLP ctrl (M05)
   set smartconnect_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_0 ]
   set_property -dict [list \
-    CONFIG.NUM_MI {3} \
+    CONFIG.NUM_MI {6} \
     CONFIG.NUM_SI {1} \
   ] $smartconnect_0
 
 
-  # Create instance: axi_bram_ctrl_1, and set properties
-  set axi_bram_ctrl_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_1 ]
-  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_1
+  # ── Param BRAM bank 0 (neurons 0,4,8,...) ────────────────────────────────
+  set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
 
-
-  # Create instance: mlp_top_0, and set properties
-  set block_name mlp_top
-  set block_cell_name mlp_top_0
-  if { [catch {set mlp_top_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   } elseif { $mlp_top_0 eq "" } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   }
-  
-  # Create instance: ilslice_0, and set properties
-  set ilslice_0 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_0 ]
-  set_property -dict [list \
-    CONFIG.DIN_FROM {15} \
-    CONFIG.DIN_TO {2} \
-    CONFIG.DIN_WIDTH {16} \
-  ] $ilslice_0
-
-
-  # Create instance: blk_mem_gen_0, and set properties
   set blk_mem_gen_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 blk_mem_gen_0 ]
   set_property -dict [list \
     CONFIG.Byte_Size {8} \
@@ -752,27 +731,112 @@ proc cr_bd_mnist_mlp_accelerator { parentCell } {
     CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
     CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
     CONFIG.Use_Byte_Write_Enable {true} \
-    CONFIG.Write_Depth_A {16384} \
+    CONFIG.Write_Depth_A {4096} \
     CONFIG.Write_Width_A {32} \
     CONFIG.use_bram_block {Stand_Alone} \
   ] $blk_mem_gen_0
 
+  # ilslice_0: Port A addr for bank 0 (AXI ctrl → BRAM)
+  # 16 KB bank → 14-bit byte addr → strip [1:0] → 12-bit word addr
+  set ilslice_0 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_0 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_0
 
-  # Create instance: axi_bram_ctrl_0, and set properties
-  set axi_bram_ctrl_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0 ]
-  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_0
-
-
-  # Create instance: ilslice_1, and set properties
+  # ilslice_1: Port B addr for bank 0 (engine → BRAM)
   set ilslice_1 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_1 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_1
+
+
+  # ── Param BRAM bank 1 (neurons 1,5,9,...) ────────────────────────────────
+  set axi_bram_ctrl_2 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_2 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_2
+
+  set blk_mem_gen_2 [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 blk_mem_gen_2 ]
   set_property -dict [list \
-    CONFIG.DIN_FROM {15} \
-    CONFIG.DIN_TO {2} \
-    CONFIG.DIN_WIDTH {16} \
-  ] $ilslice_1
+    CONFIG.Byte_Size {8} \
+    CONFIG.Memory_Type {True_Dual_Port_RAM} \
+    CONFIG.Operating_Mode_A {READ_FIRST} \
+    CONFIG.Operating_Mode_B {READ_FIRST} \
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
+    CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
+    CONFIG.Use_Byte_Write_Enable {true} \
+    CONFIG.Write_Depth_A {4096} \
+    CONFIG.Write_Width_A {32} \
+    CONFIG.use_bram_block {Stand_Alone} \
+  ] $blk_mem_gen_2
+
+  set ilslice_4 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_4 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_4
+
+  set ilslice_5 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_5 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_5
 
 
-  # Create instance: blk_mem_gen_1, and set properties
+  # ── Param BRAM bank 2 (neurons 2,6,10,...) ───────────────────────────────
+  set axi_bram_ctrl_3 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_3 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_3
+
+  set blk_mem_gen_3 [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 blk_mem_gen_3 ]
+  set_property -dict [list \
+    CONFIG.Byte_Size {8} \
+    CONFIG.Memory_Type {True_Dual_Port_RAM} \
+    CONFIG.Operating_Mode_A {READ_FIRST} \
+    CONFIG.Operating_Mode_B {READ_FIRST} \
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
+    CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
+    CONFIG.Use_Byte_Write_Enable {true} \
+    CONFIG.Write_Depth_A {4096} \
+    CONFIG.Write_Width_A {32} \
+    CONFIG.use_bram_block {Stand_Alone} \
+  ] $blk_mem_gen_3
+
+  set ilslice_6 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_6 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_6
+
+  set ilslice_7 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_7 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_7
+
+
+  # ── Param BRAM bank 3 (neurons 3,7,11,...) ───────────────────────────────
+  set axi_bram_ctrl_4 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_4 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_4
+
+  set blk_mem_gen_4 [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 blk_mem_gen_4 ]
+  set_property -dict [list \
+    CONFIG.Byte_Size {8} \
+    CONFIG.Memory_Type {True_Dual_Port_RAM} \
+    CONFIG.Operating_Mode_A {READ_FIRST} \
+    CONFIG.Operating_Mode_B {READ_FIRST} \
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false} \
+    CONFIG.Register_PortB_Output_of_Memory_Primitives {false} \
+    CONFIG.Use_Byte_Write_Enable {true} \
+    CONFIG.Write_Depth_A {4096} \
+    CONFIG.Write_Width_A {32} \
+    CONFIG.use_bram_block {Stand_Alone} \
+  ] $blk_mem_gen_4
+
+  set ilslice_8 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_8 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_8
+
+  set ilslice_9 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_9 ]
+  set_property -dict [list CONFIG.DIN_FROM {13} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {14} ] $ilslice_9
+
+
+  # ── MLP top-level module ─────────────────────────────────────────────────
+  set block_name mlp_top
+  set block_cell_name mlp_top_0
+  if { [catch {set mlp_top_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $mlp_top_0 eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+
+
+  # ── Input BRAM ───────────────────────────────────────────────────────────
+  set axi_bram_ctrl_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_1 ]
+  set_property CONFIG.SINGLE_PORT_BRAM {1} $axi_bram_ctrl_1
+
   set blk_mem_gen_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 blk_mem_gen_1 ]
   set_property -dict [list \
     CONFIG.Byte_Size {8} \
@@ -787,97 +851,138 @@ proc cr_bd_mnist_mlp_accelerator { parentCell } {
     CONFIG.use_bram_block {Stand_Alone} \
   ] $blk_mem_gen_1
 
-
-  # Create instance: ilslice_2, and set properties
+  # ilslice_2: Port A addr for input BRAM (AXI ctrl → BRAM)
   set ilslice_2 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_2 ]
-  set_property -dict [list \
-    CONFIG.DIN_FROM {9} \
-    CONFIG.DIN_TO {2} \
-    CONFIG.DIN_WIDTH {12} \
-  ] $ilslice_2
+  set_property -dict [list CONFIG.DIN_FROM {9} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {12} ] $ilslice_2
 
-
-  # Create instance: ilslice_3, and set properties
+  # ilslice_3: Port B addr for input BRAM (engine → BRAM)
   set ilslice_3 [ create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilslice:1.0 ilslice_3 ]
-  set_property -dict [list \
-    CONFIG.DIN_FROM {9} \
-    CONFIG.DIN_TO {2} \
-    CONFIG.DIN_WIDTH {10} \
-  ] $ilslice_3
+  set_property -dict [list CONFIG.DIN_FROM {9} CONFIG.DIN_TO {2} CONFIG.DIN_WIDTH {10} ] $ilslice_3
 
 
-  # Create interface connections
+  # ── AXI interface connections ────────────────────────────────────────────
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_0/S00_AXI]
   connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins smartconnect_0/M00_AXI] [get_bd_intf_pins axi_bram_ctrl_0/S_AXI]
-  connect_bd_intf_net -intf_net smartconnect_0_M01_AXI [get_bd_intf_pins smartconnect_0/M01_AXI] [get_bd_intf_pins axi_bram_ctrl_1/S_AXI]
-  connect_bd_intf_net -intf_net smartconnect_0_M02_AXI [get_bd_intf_pins smartconnect_0/M02_AXI] [get_bd_intf_pins mlp_top_0/s_axi]
+  connect_bd_intf_net -intf_net smartconnect_0_M01_AXI [get_bd_intf_pins smartconnect_0/M01_AXI] [get_bd_intf_pins axi_bram_ctrl_2/S_AXI]
+  connect_bd_intf_net -intf_net smartconnect_0_M02_AXI [get_bd_intf_pins smartconnect_0/M02_AXI] [get_bd_intf_pins axi_bram_ctrl_3/S_AXI]
+  connect_bd_intf_net -intf_net smartconnect_0_M03_AXI [get_bd_intf_pins smartconnect_0/M03_AXI] [get_bd_intf_pins axi_bram_ctrl_4/S_AXI]
+  connect_bd_intf_net -intf_net smartconnect_0_M04_AXI [get_bd_intf_pins smartconnect_0/M04_AXI] [get_bd_intf_pins axi_bram_ctrl_1/S_AXI]
+  connect_bd_intf_net -intf_net smartconnect_0_M05_AXI [get_bd_intf_pins smartconnect_0/M05_AXI] [get_bd_intf_pins mlp_top_0/s_axi]
 
-  # Create port connections
-  connect_bd_net -net axi_bram_ctrl_0_bram_addr_a  [get_bd_pins axi_bram_ctrl_0/bram_addr_a] \
-  [get_bd_pins ilslice_0/Din]
-  connect_bd_net -net axi_bram_ctrl_0_bram_clk_a  [get_bd_pins axi_bram_ctrl_0/bram_clk_a] \
-  [get_bd_pins blk_mem_gen_0/clka]
-  connect_bd_net -net axi_bram_ctrl_0_bram_en_a  [get_bd_pins axi_bram_ctrl_0/bram_en_a] \
-  [get_bd_pins blk_mem_gen_0/ena]
-  connect_bd_net -net axi_bram_ctrl_0_bram_we_a  [get_bd_pins axi_bram_ctrl_0/bram_we_a] \
-  [get_bd_pins blk_mem_gen_0/wea]
-  connect_bd_net -net axi_bram_ctrl_0_bram_wrdata_a  [get_bd_pins axi_bram_ctrl_0/bram_wrdata_a] \
-  [get_bd_pins blk_mem_gen_0/dina]
-  connect_bd_net -net axi_bram_ctrl_1_bram_addr_a  [get_bd_pins axi_bram_ctrl_1/bram_addr_a] \
-  [get_bd_pins ilslice_2/Din]
-  connect_bd_net -net axi_bram_ctrl_1_bram_clk_a  [get_bd_pins axi_bram_ctrl_1/bram_clk_a] \
-  [get_bd_pins blk_mem_gen_1/clka]
-  connect_bd_net -net axi_bram_ctrl_1_bram_en_a  [get_bd_pins axi_bram_ctrl_1/bram_en_a] \
-  [get_bd_pins blk_mem_gen_1/ena]
-  connect_bd_net -net axi_bram_ctrl_1_bram_we_a  [get_bd_pins axi_bram_ctrl_1/bram_we_a] \
-  [get_bd_pins blk_mem_gen_1/wea]
-  connect_bd_net -net axi_bram_ctrl_1_bram_wrdata_a  [get_bd_pins axi_bram_ctrl_1/bram_wrdata_a] \
-  [get_bd_pins blk_mem_gen_1/dina]
-  connect_bd_net -net blk_mem_gen_0_douta  [get_bd_pins blk_mem_gen_0/douta] \
-  [get_bd_pins axi_bram_ctrl_0/bram_rddata_a]
-  connect_bd_net -net blk_mem_gen_0_doutb  [get_bd_pins blk_mem_gen_0/doutb] \
-  [get_bd_pins mlp_top_0/param_bram_rdata]
-  connect_bd_net -net blk_mem_gen_1_douta  [get_bd_pins blk_mem_gen_1/douta] \
-  [get_bd_pins axi_bram_ctrl_1/bram_rddata_a]
-  connect_bd_net -net blk_mem_gen_1_doutb  [get_bd_pins blk_mem_gen_1/doutb] \
-  [get_bd_pins mlp_top_0/input_bram_rdata]
-  connect_bd_net -net ilslice_0_Dout  [get_bd_pins ilslice_0/Dout] \
-  [get_bd_pins blk_mem_gen_0/addra]
-  connect_bd_net -net ilslice_1_Dout  [get_bd_pins ilslice_1/Dout] \
-  [get_bd_pins blk_mem_gen_0/addrb]
-  connect_bd_net -net ilslice_2_Dout  [get_bd_pins ilslice_2/Dout] \
-  [get_bd_pins blk_mem_gen_1/addra]
-  connect_bd_net -net ilslice_3_Dout  [get_bd_pins ilslice_3/Dout] \
-  [get_bd_pins blk_mem_gen_1/addrb]
-  connect_bd_net -net mlp_top_0_input_bram_addr  [get_bd_pins mlp_top_0/input_bram_addr] \
-  [get_bd_pins ilslice_3/Din]
-  connect_bd_net -net mlp_top_0_input_bram_en  [get_bd_pins mlp_top_0/input_bram_en] \
-  [get_bd_pins blk_mem_gen_1/enb]
-  connect_bd_net -net mlp_top_0_param_bram_addr  [get_bd_pins mlp_top_0/param_bram_addr] \
-  [get_bd_pins ilslice_1/Din]
-  connect_bd_net -net mlp_top_0_param_bram_en  [get_bd_pins mlp_top_0/param_bram_en] \
-  [get_bd_pins blk_mem_gen_0/enb]
-  connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0/peripheral_aresetn] \
-  [get_bd_pins smartconnect_0/aresetn] \
-  [get_bd_pins axi_bram_ctrl_1/s_axi_aresetn] \
-  [get_bd_pins mlp_top_0/s_axi_aresetn] \
-  [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn]
-  connect_bd_net -net processing_system7_0_FCLK_CLK0  [get_bd_pins processing_system7_0/FCLK_CLK0] \
-  [get_bd_pins proc_sys_reset_0/slowest_sync_clk] \
-  [get_bd_pins smartconnect_0/aclk] \
-  [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
-  [get_bd_pins axi_bram_ctrl_1/s_axi_aclk] \
-  [get_bd_pins mlp_top_0/s_axi_aclk] \
-  [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
-  [get_bd_pins blk_mem_gen_0/clkb] \
-  [get_bd_pins blk_mem_gen_1/clkb]
-  connect_bd_net -net processing_system7_0_FCLK_RESET0_N  [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
-  [get_bd_pins proc_sys_reset_0/ext_reset_in]
+  # ── Param bank 0 connections ─────────────────────────────────────────────
+  connect_bd_net -net axi_bram_ctrl_0_bram_addr_a [get_bd_pins axi_bram_ctrl_0/bram_addr_a] [get_bd_pins ilslice_0/Din]
+  connect_bd_net -net axi_bram_ctrl_0_bram_clk_a  [get_bd_pins axi_bram_ctrl_0/bram_clk_a]  [get_bd_pins blk_mem_gen_0/clka]
+  connect_bd_net -net axi_bram_ctrl_0_bram_en_a   [get_bd_pins axi_bram_ctrl_0/bram_en_a]   [get_bd_pins blk_mem_gen_0/ena]
+  connect_bd_net -net axi_bram_ctrl_0_bram_we_a   [get_bd_pins axi_bram_ctrl_0/bram_we_a]   [get_bd_pins blk_mem_gen_0/wea]
+  connect_bd_net -net axi_bram_ctrl_0_bram_wrdata_a [get_bd_pins axi_bram_ctrl_0/bram_wrdata_a] [get_bd_pins blk_mem_gen_0/dina]
+  connect_bd_net -net blk_mem_gen_0_douta [get_bd_pins blk_mem_gen_0/douta] [get_bd_pins axi_bram_ctrl_0/bram_rddata_a]
+  connect_bd_net -net blk_mem_gen_0_doutb [get_bd_pins blk_mem_gen_0/doutb] [get_bd_pins mlp_top_0/param_bram0_rdata]
+  connect_bd_net -net ilslice_0_Dout [get_bd_pins ilslice_0/Dout] [get_bd_pins blk_mem_gen_0/addra]
+  connect_bd_net -net ilslice_1_Dout [get_bd_pins ilslice_1/Dout] [get_bd_pins blk_mem_gen_0/addrb]
 
-  # Create address segments
-  assign_bd_address -offset 0x40000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  # ── Param bank 1 connections ─────────────────────────────────────────────
+  connect_bd_net -net axi_bram_ctrl_2_bram_addr_a [get_bd_pins axi_bram_ctrl_2/bram_addr_a] [get_bd_pins ilslice_4/Din]
+  connect_bd_net -net axi_bram_ctrl_2_bram_clk_a  [get_bd_pins axi_bram_ctrl_2/bram_clk_a]  [get_bd_pins blk_mem_gen_2/clka]
+  connect_bd_net -net axi_bram_ctrl_2_bram_en_a   [get_bd_pins axi_bram_ctrl_2/bram_en_a]   [get_bd_pins blk_mem_gen_2/ena]
+  connect_bd_net -net axi_bram_ctrl_2_bram_we_a   [get_bd_pins axi_bram_ctrl_2/bram_we_a]   [get_bd_pins blk_mem_gen_2/wea]
+  connect_bd_net -net axi_bram_ctrl_2_bram_wrdata_a [get_bd_pins axi_bram_ctrl_2/bram_wrdata_a] [get_bd_pins blk_mem_gen_2/dina]
+  connect_bd_net -net blk_mem_gen_2_douta [get_bd_pins blk_mem_gen_2/douta] [get_bd_pins axi_bram_ctrl_2/bram_rddata_a]
+  connect_bd_net -net blk_mem_gen_2_doutb [get_bd_pins blk_mem_gen_2/doutb] [get_bd_pins mlp_top_0/param_bram1_rdata]
+  connect_bd_net -net ilslice_4_Dout [get_bd_pins ilslice_4/Dout] [get_bd_pins blk_mem_gen_2/addra]
+  connect_bd_net -net ilslice_5_Dout [get_bd_pins ilslice_5/Dout] [get_bd_pins blk_mem_gen_2/addrb]
+
+  # ── Param bank 2 connections ─────────────────────────────────────────────
+  connect_bd_net -net axi_bram_ctrl_3_bram_addr_a [get_bd_pins axi_bram_ctrl_3/bram_addr_a] [get_bd_pins ilslice_6/Din]
+  connect_bd_net -net axi_bram_ctrl_3_bram_clk_a  [get_bd_pins axi_bram_ctrl_3/bram_clk_a]  [get_bd_pins blk_mem_gen_3/clka]
+  connect_bd_net -net axi_bram_ctrl_3_bram_en_a   [get_bd_pins axi_bram_ctrl_3/bram_en_a]   [get_bd_pins blk_mem_gen_3/ena]
+  connect_bd_net -net axi_bram_ctrl_3_bram_we_a   [get_bd_pins axi_bram_ctrl_3/bram_we_a]   [get_bd_pins blk_mem_gen_3/wea]
+  connect_bd_net -net axi_bram_ctrl_3_bram_wrdata_a [get_bd_pins axi_bram_ctrl_3/bram_wrdata_a] [get_bd_pins blk_mem_gen_3/dina]
+  connect_bd_net -net blk_mem_gen_3_douta [get_bd_pins blk_mem_gen_3/douta] [get_bd_pins axi_bram_ctrl_3/bram_rddata_a]
+  connect_bd_net -net blk_mem_gen_3_doutb [get_bd_pins blk_mem_gen_3/doutb] [get_bd_pins mlp_top_0/param_bram2_rdata]
+  connect_bd_net -net ilslice_6_Dout [get_bd_pins ilslice_6/Dout] [get_bd_pins blk_mem_gen_3/addra]
+  connect_bd_net -net ilslice_7_Dout [get_bd_pins ilslice_7/Dout] [get_bd_pins blk_mem_gen_3/addrb]
+
+  # ── Param bank 3 connections ─────────────────────────────────────────────
+  connect_bd_net -net axi_bram_ctrl_4_bram_addr_a [get_bd_pins axi_bram_ctrl_4/bram_addr_a] [get_bd_pins ilslice_8/Din]
+  connect_bd_net -net axi_bram_ctrl_4_bram_clk_a  [get_bd_pins axi_bram_ctrl_4/bram_clk_a]  [get_bd_pins blk_mem_gen_4/clka]
+  connect_bd_net -net axi_bram_ctrl_4_bram_en_a   [get_bd_pins axi_bram_ctrl_4/bram_en_a]   [get_bd_pins blk_mem_gen_4/ena]
+  connect_bd_net -net axi_bram_ctrl_4_bram_we_a   [get_bd_pins axi_bram_ctrl_4/bram_we_a]   [get_bd_pins blk_mem_gen_4/wea]
+  connect_bd_net -net axi_bram_ctrl_4_bram_wrdata_a [get_bd_pins axi_bram_ctrl_4/bram_wrdata_a] [get_bd_pins blk_mem_gen_4/dina]
+  connect_bd_net -net blk_mem_gen_4_douta [get_bd_pins blk_mem_gen_4/douta] [get_bd_pins axi_bram_ctrl_4/bram_rddata_a]
+  connect_bd_net -net blk_mem_gen_4_doutb [get_bd_pins blk_mem_gen_4/doutb] [get_bd_pins mlp_top_0/param_bram3_rdata]
+  connect_bd_net -net ilslice_8_Dout [get_bd_pins ilslice_8/Dout] [get_bd_pins blk_mem_gen_4/addra]
+  connect_bd_net -net ilslice_9_Dout [get_bd_pins ilslice_9/Dout] [get_bd_pins blk_mem_gen_4/addrb]
+
+  # ── Shared param BRAM addr/en (broadcast to all 4 bank Port Bs) ──────────
+  # The engine drives one addr and one en; all 4 bank ilslices and enables
+  # receive the same signals simultaneously.
+  connect_bd_net -net mlp_top_0_param_bram_addr \
+    [get_bd_pins mlp_top_0/param_bram_addr] \
+    [get_bd_pins ilslice_1/Din] \
+    [get_bd_pins ilslice_5/Din] \
+    [get_bd_pins ilslice_7/Din] \
+    [get_bd_pins ilslice_9/Din]
+  connect_bd_net -net mlp_top_0_param_bram_en \
+    [get_bd_pins mlp_top_0/param_bram_en] \
+    [get_bd_pins blk_mem_gen_0/enb] \
+    [get_bd_pins blk_mem_gen_2/enb] \
+    [get_bd_pins blk_mem_gen_3/enb] \
+    [get_bd_pins blk_mem_gen_4/enb]
+
+  # ── Input BRAM connections ────────────────────────────────────────────────
+  connect_bd_net -net axi_bram_ctrl_1_bram_addr_a [get_bd_pins axi_bram_ctrl_1/bram_addr_a] [get_bd_pins ilslice_2/Din]
+  connect_bd_net -net axi_bram_ctrl_1_bram_clk_a  [get_bd_pins axi_bram_ctrl_1/bram_clk_a]  [get_bd_pins blk_mem_gen_1/clka]
+  connect_bd_net -net axi_bram_ctrl_1_bram_en_a   [get_bd_pins axi_bram_ctrl_1/bram_en_a]   [get_bd_pins blk_mem_gen_1/ena]
+  connect_bd_net -net axi_bram_ctrl_1_bram_we_a   [get_bd_pins axi_bram_ctrl_1/bram_we_a]   [get_bd_pins blk_mem_gen_1/wea]
+  connect_bd_net -net axi_bram_ctrl_1_bram_wrdata_a [get_bd_pins axi_bram_ctrl_1/bram_wrdata_a] [get_bd_pins blk_mem_gen_1/dina]
+  connect_bd_net -net blk_mem_gen_1_douta [get_bd_pins blk_mem_gen_1/douta] [get_bd_pins axi_bram_ctrl_1/bram_rddata_a]
+  connect_bd_net -net blk_mem_gen_1_doutb [get_bd_pins blk_mem_gen_1/doutb] [get_bd_pins mlp_top_0/input_bram_rdata]
+  connect_bd_net -net ilslice_2_Dout [get_bd_pins ilslice_2/Dout] [get_bd_pins blk_mem_gen_1/addra]
+  connect_bd_net -net ilslice_3_Dout [get_bd_pins ilslice_3/Dout] [get_bd_pins blk_mem_gen_1/addrb]
+  connect_bd_net -net mlp_top_0_input_bram_addr [get_bd_pins mlp_top_0/input_bram_addr] [get_bd_pins ilslice_3/Din]
+  connect_bd_net -net mlp_top_0_input_bram_en   [get_bd_pins mlp_top_0/input_bram_en]   [get_bd_pins blk_mem_gen_1/enb]
+
+  # ── Reset and clock ───────────────────────────────────────────────────────
+  connect_bd_net -net proc_sys_reset_0_peripheral_aresetn \
+    [get_bd_pins proc_sys_reset_0/peripheral_aresetn] \
+    [get_bd_pins smartconnect_0/aresetn] \
+    [get_bd_pins mlp_top_0/s_axi_aresetn] \
+    [get_bd_pins axi_bram_ctrl_0/s_axi_aresetn] \
+    [get_bd_pins axi_bram_ctrl_1/s_axi_aresetn] \
+    [get_bd_pins axi_bram_ctrl_2/s_axi_aresetn] \
+    [get_bd_pins axi_bram_ctrl_3/s_axi_aresetn] \
+    [get_bd_pins axi_bram_ctrl_4/s_axi_aresetn]
+
+  connect_bd_net -net processing_system7_0_FCLK_CLK0 \
+    [get_bd_pins processing_system7_0/FCLK_CLK0] \
+    [get_bd_pins proc_sys_reset_0/slowest_sync_clk] \
+    [get_bd_pins smartconnect_0/aclk] \
+    [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] \
+    [get_bd_pins mlp_top_0/s_axi_aclk] \
+    [get_bd_pins axi_bram_ctrl_0/s_axi_aclk] \
+    [get_bd_pins axi_bram_ctrl_1/s_axi_aclk] \
+    [get_bd_pins axi_bram_ctrl_2/s_axi_aclk] \
+    [get_bd_pins axi_bram_ctrl_3/s_axi_aclk] \
+    [get_bd_pins axi_bram_ctrl_4/s_axi_aclk] \
+    [get_bd_pins blk_mem_gen_0/clkb] \
+    [get_bd_pins blk_mem_gen_1/clkb] \
+    [get_bd_pins blk_mem_gen_2/clkb] \
+    [get_bd_pins blk_mem_gen_3/clkb] \
+    [get_bd_pins blk_mem_gen_4/clkb]
+
+  connect_bd_net -net processing_system7_0_FCLK_RESET0_N \
+    [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
+    [get_bd_pins proc_sys_reset_0/ext_reset_in]
+
+  # ── Address segments ──────────────────────────────────────────────────────
+  # Param banks: 4 × 16 KB at 0x40000000–0x4000FFFF
+  assign_bd_address -offset 0x40000000 -range 0x00004000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x40004000 -range 0x00004000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_2/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x40008000 -range 0x00004000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_3/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x4000C000 -range 0x00004000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_4/S_AXI/Mem0] -force
+  # Input BRAM and AXI-Lite ctrl (unchanged)
   assign_bd_address -offset 0x40010000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_bram_ctrl_1/S_AXI/Mem0] -force
   assign_bd_address -offset 0x40020000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs mlp_top_0/s_axi/reg0] -force
 

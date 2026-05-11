@@ -7,20 +7,36 @@
 // =============================================================================
 // mlp_engine.v
 //
-// Parallel-word MLP inference engine - Zybo Z7-10
+// 4-neuron-parallel MLP inference engine - Zybo Z7-10
 // Network : 784 -> FC1(64, ReLU) -> FC2(32, ReLU) -> FC3(10, argmax)
-// Weights : INT8, packed 4-per-32-bit word in the Param BRAM
-// Biases  : INT32, one value per 32-bit word in the Param BRAM
-// Inputs  : INT8 pixels, packed 4-per-32-bit word in the Input BRAM
-// MAC     : 3 cycles per 4 multiplies (ADDR -> LATCH -> ACC)
-//           One 32-bit BRAM fetch feeds four signed multiplies in parallel.
-// Output  : 4-bit predicted class (0-9), one-cycle done pulse
+// Weights : INT8, packed 4-per-32-bit word, split across 4 BRAM banks.
+//           Bank k holds weights for output neurons {k, k+4, k+8, ...}.
+//           All 4 banks are read simultaneously each cycle — 4 weight words
+//           arrive in parallel — feeding 16 signed INT8×INT8 multipliers.
+// Biases  : INT32, one per word per bank, at same bank-local address.
+// Inputs  : INT8 pixels, packed 4-per-32-bit word in the Input BRAM.
 //
-// Timing at 100 MHz:
-//   FC1: 64 x (6 + 196x3) ~= 38 016 cycles
-//   FC2: 32 x (6 +  16x3) ~=  1 728 cycles
-//   FC3: 10 x (6 +   8x3) ~=    300 cycles
-//   Total ~= 40 044 cycles ~= 0.40 ms / inference
+// Parallelism: 4 output neurons computed simultaneously.
+//   Each group of 4 neurons shares the same input word each cycle.
+//   4 banks × 4 MACs/bank = 16 DSPs total.
+//
+// Timing at 100 MHz (3 cycles per 4-input-word group):
+//   FC1: 16 groups × (6 + 196×3) ~= 9 504 cycles
+//   FC2:  8 groups × (6 +  16×3) ~=   432 cycles
+//   FC3:  3 groups × (6 +   8×3) ~=    90 cycles   (FC3 padded to 12 neurons)
+//   Total ~= 10 026 cycles ~= 0.10 ms / inference
+//
+// FC3 is padded to 12 neurons (3 groups of 4) in the weight export.
+// Logits [10] and [11] are computed but argmax checks only [0..9].
+//
+// Per-bank BRAM byte offsets (same for all 4 banks):
+//   FC1_W_BASE  0x0000  FC1 weights  16 × 784 B = 12 544 B
+//   FC1_B_BASE  0x3100  FC1 biases   16 × 4 B   =    64 B
+//   FC2_W_BASE  0x3140  FC2 weights   8 ×  64 B =   512 B
+//   FC2_B_BASE  0x3340  FC2 biases    8 × 4 B   =    32 B
+//   FC3_W_BASE  0x3360  FC3 weights   3 ×  32 B =    96 B
+//   FC3_B_BASE  0x33C0  FC3 biases    3 × 4 B   =    12 B
+//   Total per bank: 13 260 B  (<16 KB)
 // =============================================================================
 `timescale 1ns / 1ps
 
@@ -35,21 +51,26 @@ module mlp_engine #(
     output reg         done,
     output reg  [3:0]  result,
 
-    output reg  [15:0] param_addr,
+    // 4 param BRAM banks — shared address/enable, separate read data
+    output reg  [13:0] param_addr,
     output reg         param_en,
-    input  wire [31:0] param_rdata,
+    input  wire [31:0] param0_rdata,
+    input  wire [31:0] param1_rdata,
+    input  wire [31:0] param2_rdata,
+    input  wire [31:0] param3_rdata,
 
     output reg  [9:0]  input_addr,
     output reg         input_en,
     input  wire [31:0] input_rdata
 );
 
-localparam [15:0] FC1_W_BASE = 16'h0000;
-localparam [15:0] FC1_B_BASE = 16'hC400;
-localparam [15:0] FC2_W_BASE = 16'hC500;
-localparam [15:0] FC2_B_BASE = 16'hCD00;
-localparam [15:0] FC3_W_BASE = 16'hCD80;
-localparam [15:0] FC3_B_BASE = 16'hCEC0;
+// ── Per-bank BRAM byte offsets (identical for all 4 banks) ───────────────────
+localparam [13:0] FC1_W_BASE = 14'h0000;
+localparam [13:0] FC1_B_BASE = 14'h3100;
+localparam [13:0] FC2_W_BASE = 14'h3140;
+localparam [13:0] FC2_B_BASE = 14'h3340;
+localparam [13:0] FC3_W_BASE = 14'h3360;
+localparam [13:0] FC3_B_BASE = 14'h33C0;
 
 localparam [3:0]
     S_IDLE        = 4'd0,
@@ -58,8 +79,8 @@ localparam [3:0]
     S_BIAS_LATCH  = 4'd3,
     S_BIAS_LOAD   = 4'd4,
     S_W_ADDR      = 4'd5,
-    S_W_LATCH     = 4'd6,  // pipeline wait: BRAM samples address this cycle
-    S_W_READ      = 4'd13, // latch: BRAM output valid now
+    S_W_LATCH     = 4'd6,
+    S_W_READ      = 4'd13,
     S_W_ACC       = 4'd7,
     S_SAVE        = 4'd8,
     S_NEXT_LAYER  = 4'd9,
@@ -70,38 +91,61 @@ localparam [3:0]
 reg [3:0] state;
 
 reg [1:0]  layer;
-reg [15:0] w_base;
-reg [15:0] b_base;
+reg [13:0] w_base;
+reg [13:0] b_base;
 reg [9:0]  n_in;
-reg [6:0]  n_out;
+reg [4:0]  n_out;     // groups of 4 neurons: FC1=16, FC2=8, FC3=3
 reg        do_relu;
 
-reg [6:0]  j;
-reg [9:0]  i;
-reg [15:0] w_row_base;
-reg [15:0] b_row_base;
+reg [4:0]  j;         // group index (0 .. n_out-1)
+reg [9:0]  i;         // byte offset within a weight row (0, 4, 8, ...)
+reg [13:0] w_row_base;
+reg [13:0] b_row_base;
 
-reg signed [31:0] acc;
-reg signed [7:0]  w_latch0;
-reg signed [7:0]  w_latch1;
-reg signed [7:0]  w_latch2;
-reg signed [7:0]  w_latch3;
-reg signed [8:0]  x_latch0;
-reg signed [8:0]  x_latch1;
-reg signed [8:0]  x_latch2;
-reg signed [8:0]  x_latch3;
+// ── 4 independent accumulators (one per parallel output neuron) ──────────────
+reg signed [31:0] acc0, acc1, acc2, acc3;
 
+// ── Weight latches: 4 banks × 4 bytes each = 16 INT8 registers ──────────────
+reg signed [7:0]  w0_latch0, w0_latch1, w0_latch2, w0_latch3;
+reg signed [7:0]  w1_latch0, w1_latch1, w1_latch2, w1_latch3;
+reg signed [7:0]  w2_latch0, w2_latch1, w2_latch2, w2_latch3;
+reg signed [7:0]  w3_latch0, w3_latch1, w3_latch2, w3_latch3;
+
+// ── Input latches: shared across all 4 banks ─────────────────────────────────
+reg signed [8:0]  x_latch0, x_latch1, x_latch2, x_latch3;
+
+// ── Activation storage ───────────────────────────────────────────────────────
 reg [7:0] act1 [0:63];
 reg [7:0] act2 [0:31];
-reg signed [31:0] logits [0:9];
+// FC3 padded to 12 neurons (3 groups × 4); argmax only checks [0..9]
+reg signed [31:0] logits [0:11];
 
 reg [3:0] argmax_k;
 
-(* use_dsp = "yes" *) wire signed [16:0] mul0 = $signed(w_latch0) * $signed(x_latch0);
-(* use_dsp = "yes" *) wire signed [16:0] mul1 = $signed(w_latch1) * $signed(x_latch1);
-(* use_dsp = "yes" *) wire signed [16:0] mul2 = $signed(w_latch2) * $signed(x_latch2);
-(* use_dsp = "yes" *) wire signed [16:0] mul3 = $signed(w_latch3) * $signed(x_latch3);
-wire signed [19:0] mac4_sum = mul0 + mul1 + mul2 + mul3;
+// ── 16 DSP48 multipliers: 4 banks × 4 MACs each ─────────────────────────────
+(* use_dsp = "yes" *) wire signed [16:0] mul00 = $signed(w0_latch0) * $signed(x_latch0);
+(* use_dsp = "yes" *) wire signed [16:0] mul01 = $signed(w0_latch1) * $signed(x_latch1);
+(* use_dsp = "yes" *) wire signed [16:0] mul02 = $signed(w0_latch2) * $signed(x_latch2);
+(* use_dsp = "yes" *) wire signed [16:0] mul03 = $signed(w0_latch3) * $signed(x_latch3);
+wire signed [19:0] mac4_sum0 = mul00 + mul01 + mul02 + mul03;
+
+(* use_dsp = "yes" *) wire signed [16:0] mul10 = $signed(w1_latch0) * $signed(x_latch0);
+(* use_dsp = "yes" *) wire signed [16:0] mul11 = $signed(w1_latch1) * $signed(x_latch1);
+(* use_dsp = "yes" *) wire signed [16:0] mul12 = $signed(w1_latch2) * $signed(x_latch2);
+(* use_dsp = "yes" *) wire signed [16:0] mul13 = $signed(w1_latch3) * $signed(x_latch3);
+wire signed [19:0] mac4_sum1 = mul10 + mul11 + mul12 + mul13;
+
+(* use_dsp = "yes" *) wire signed [16:0] mul20 = $signed(w2_latch0) * $signed(x_latch0);
+(* use_dsp = "yes" *) wire signed [16:0] mul21 = $signed(w2_latch1) * $signed(x_latch1);
+(* use_dsp = "yes" *) wire signed [16:0] mul22 = $signed(w2_latch2) * $signed(x_latch2);
+(* use_dsp = "yes" *) wire signed [16:0] mul23 = $signed(w2_latch3) * $signed(x_latch3);
+wire signed [19:0] mac4_sum2 = mul20 + mul21 + mul22 + mul23;
+
+(* use_dsp = "yes" *) wire signed [16:0] mul30 = $signed(w3_latch0) * $signed(x_latch0);
+(* use_dsp = "yes" *) wire signed [16:0] mul31 = $signed(w3_latch1) * $signed(x_latch1);
+(* use_dsp = "yes" *) wire signed [16:0] mul32 = $signed(w3_latch2) * $signed(x_latch2);
+(* use_dsp = "yes" *) wire signed [16:0] mul33 = $signed(w3_latch3) * $signed(x_latch3);
+wire signed [19:0] mac4_sum3 = mul30 + mul31 + mul32 + mul33;
 
 function [7:0] relu_clip;
     input signed [31:0] x;
@@ -124,29 +168,29 @@ always @(posedge clk or negedge rst_n) begin : fsm
         result     <= 4'd0;
         param_en   <= 1'b0;
         input_en   <= 1'b0;
-        param_addr <= 16'h0000;
+        param_addr <= 14'h0000;
         input_addr <= 10'h000;
-        acc        <= 32'sd0;
-        w_latch0   <= 8'sd0;
-        w_latch1   <= 8'sd0;
-        w_latch2   <= 8'sd0;
-        w_latch3   <= 8'sd0;
-        x_latch0   <= 9'sd0;
-        x_latch1   <= 9'sd0;
-        x_latch2   <= 9'sd0;
-        x_latch3   <= 9'sd0;
-        j          <= 7'd0;
+        acc0       <= 32'sd0;
+        acc1       <= 32'sd0;
+        acc2       <= 32'sd0;
+        acc3       <= 32'sd0;
+        w0_latch0  <= 8'sd0; w0_latch1 <= 8'sd0; w0_latch2 <= 8'sd0; w0_latch3 <= 8'sd0;
+        w1_latch0  <= 8'sd0; w1_latch1 <= 8'sd0; w1_latch2 <= 8'sd0; w1_latch3 <= 8'sd0;
+        w2_latch0  <= 8'sd0; w2_latch1 <= 8'sd0; w2_latch2 <= 8'sd0; w2_latch3 <= 8'sd0;
+        w3_latch0  <= 8'sd0; w3_latch1 <= 8'sd0; w3_latch2 <= 8'sd0; w3_latch3 <= 8'sd0;
+        x_latch0   <= 9'sd0; x_latch1  <= 9'sd0; x_latch2  <= 9'sd0; x_latch3  <= 9'sd0;
+        j          <= 5'd0;
         i          <= 10'd0;
         layer      <= 2'd0;
-        w_base     <= 16'h0000;
-        b_base     <= 16'h0000;
+        w_base     <= 14'h0000;
+        b_base     <= 14'h0000;
         n_in       <= 10'd0;
-        n_out      <= 7'd0;
+        n_out      <= 5'd0;
         do_relu    <= 1'b0;
-        w_row_base <= 16'h0000;
-        b_row_base <= 16'h0000;
+        w_row_base <= 14'h0000;
+        b_row_base <= 14'h0000;
         argmax_k   <= 4'd0;
-        for (ridx = 0; ridx < 10; ridx = ridx + 1)
+        for (ridx = 0; ridx < 12; ridx = ridx + 1)
             logits[ridx] <= 32'sd0;
     end else begin
         param_en <= 1'b0;
@@ -162,13 +206,13 @@ always @(posedge clk or negedge rst_n) begin : fsm
             end
 
             S_FC_INIT: begin
-                j <= 7'd0;
+                j <= 5'd0;
                 case (layer)
                     2'd0: begin
                         w_base     <= FC1_W_BASE;
                         b_base     <= FC1_B_BASE;
                         n_in       <= 10'd784;
-                        n_out      <= 7'd64;
+                        n_out      <= 5'd16;   // 64 neurons / 4 parallel
                         do_relu    <= 1'b1;
                         w_row_base <= FC1_W_BASE;
                         b_row_base <= FC1_B_BASE;
@@ -177,7 +221,7 @@ always @(posedge clk or negedge rst_n) begin : fsm
                         w_base     <= FC2_W_BASE;
                         b_base     <= FC2_B_BASE;
                         n_in       <= 10'd64;
-                        n_out      <= 7'd32;
+                        n_out      <= 5'd8;    // 32 neurons / 4 parallel
                         do_relu    <= 1'b1;
                         w_row_base <= FC2_W_BASE;
                         b_row_base <= FC2_B_BASE;
@@ -186,7 +230,7 @@ always @(posedge clk or negedge rst_n) begin : fsm
                         w_base     <= FC3_W_BASE;
                         b_base     <= FC3_B_BASE;
                         n_in       <= 10'd32;
-                        n_out      <= 7'd10;
+                        n_out      <= 5'd3;    // 12 padded neurons / 4 parallel
                         do_relu    <= 1'b0;
                         w_row_base <= FC3_W_BASE;
                         b_row_base <= FC3_B_BASE;
@@ -206,35 +250,52 @@ always @(posedge clk or negedge rst_n) begin : fsm
             end
 
             S_BIAS_LOAD: begin
-                acc   <= $signed(param_rdata);
+                // Each bank returns the bias for its neuron in this group
+                acc0  <= $signed(param0_rdata);
+                acc1  <= $signed(param1_rdata);
+                acc2  <= $signed(param2_rdata);
+                acc3  <= $signed(param3_rdata);
                 i     <= 10'd0;
                 state <= S_W_ADDR;
             end
 
             S_W_ADDR: begin
-                param_addr <= w_row_base + i;
+                param_addr <= w_row_base + i[13:0];
                 param_en   <= 1'b1;
                 if (layer == 2'd0) begin
-                    input_addr <= i;
+                    input_addr <= i[9:0];
                     input_en   <= 1'b1;
                 end
                 state <= S_W_LATCH;
             end
 
             S_W_LATCH: begin
-                // Pipeline wait: the Xilinx block RAM sampled the address
-                // this cycle (ENB=1 was set in S_W_ADDR). DOUTB will be
-                // valid on the NEXT posedge (S_W_READ). Do not read yet.
                 state <= S_W_READ;
             end
 
             S_W_READ: begin
-                // BRAM output is now valid (one full cycle after sampling).
-                w_latch0 <= $signed(param_rdata[7:0]);
-                w_latch1 <= $signed(param_rdata[15:8]);
-                w_latch2 <= $signed(param_rdata[23:16]);
-                w_latch3 <= $signed(param_rdata[31:24]);
+                // Latch weights from all 4 banks simultaneously
+                w0_latch0 <= $signed(param0_rdata[7:0]);
+                w0_latch1 <= $signed(param0_rdata[15:8]);
+                w0_latch2 <= $signed(param0_rdata[23:16]);
+                w0_latch3 <= $signed(param0_rdata[31:24]);
 
+                w1_latch0 <= $signed(param1_rdata[7:0]);
+                w1_latch1 <= $signed(param1_rdata[15:8]);
+                w1_latch2 <= $signed(param1_rdata[23:16]);
+                w1_latch3 <= $signed(param1_rdata[31:24]);
+
+                w2_latch0 <= $signed(param2_rdata[7:0]);
+                w2_latch1 <= $signed(param2_rdata[15:8]);
+                w2_latch2 <= $signed(param2_rdata[23:16]);
+                w2_latch3 <= $signed(param2_rdata[31:24]);
+
+                w3_latch0 <= $signed(param3_rdata[7:0]);
+                w3_latch1 <= $signed(param3_rdata[15:8]);
+                w3_latch2 <= $signed(param3_rdata[23:16]);
+                w3_latch3 <= $signed(param3_rdata[31:24]);
+
+                // Input latches are shared across all 4 banks
                 case (layer)
                     2'd0: begin
                         x_latch0 <= {input_rdata[7],  input_rdata[7:0]};
@@ -259,8 +320,12 @@ always @(posedge clk or negedge rst_n) begin : fsm
             end
 
             S_W_ACC: begin
-                acc <= acc + $signed(mac4_sum);
-                i   <= i + 10'd4;
+                // Accumulate 4 neurons in parallel; same input word for all
+                acc0 <= acc0 + $signed(mac4_sum0);
+                acc1 <= acc1 + $signed(mac4_sum1);
+                acc2 <= acc2 + $signed(mac4_sum2);
+                acc3 <= acc3 + $signed(mac4_sum3);
+                i    <= i + 10'd4;
                 if (i == n_in - 10'd4)
                     state <= S_SAVE;
                 else
@@ -270,19 +335,32 @@ always @(posedge clk or negedge rst_n) begin : fsm
             S_SAVE: begin
                 if (do_relu) begin
                     case (layer)
-                        2'd0:    act1[j] <= relu_clip($signed(acc) >>> FC1_REQ_SHIFT);
-                        2'd1:    act2[j] <= relu_clip($signed(acc) >>> FC2_REQ_SHIFT);
+                        2'd0: begin
+                            act1[j*4 + 0] <= relu_clip($signed(acc0) >>> FC1_REQ_SHIFT);
+                            act1[j*4 + 1] <= relu_clip($signed(acc1) >>> FC1_REQ_SHIFT);
+                            act1[j*4 + 2] <= relu_clip($signed(acc2) >>> FC1_REQ_SHIFT);
+                            act1[j*4 + 3] <= relu_clip($signed(acc3) >>> FC1_REQ_SHIFT);
+                        end
+                        2'd1: begin
+                            act2[j*4 + 0] <= relu_clip($signed(acc0) >>> FC2_REQ_SHIFT);
+                            act2[j*4 + 1] <= relu_clip($signed(acc1) >>> FC2_REQ_SHIFT);
+                            act2[j*4 + 2] <= relu_clip($signed(acc2) >>> FC2_REQ_SHIFT);
+                            act2[j*4 + 3] <= relu_clip($signed(acc3) >>> FC2_REQ_SHIFT);
+                        end
                         default: ;
                     endcase
                 end else begin
-                    logits[j] <= acc;
+                    logits[j*4 + 0] <= acc0;
+                    logits[j*4 + 1] <= acc1;
+                    logits[j*4 + 2] <= acc2;
+                    logits[j*4 + 3] <= acc3;
                 end
 
-                j          <= j + 7'd1;
+                j          <= j + 5'd1;
                 w_row_base <= w_row_base + n_in;
-                b_row_base <= b_row_base + 16'd4;
+                b_row_base <= b_row_base + 14'd4;
 
-                if (j == n_out - 7'd1)
+                if (j == n_out - 5'd1)
                     state <= S_NEXT_LAYER;
                 else
                     state <= S_BIAS_ADDR;
@@ -303,6 +381,7 @@ always @(posedge clk or negedge rst_n) begin : fsm
                 state    <= S_ARGMAX_CMP;
             end
 
+            // Argmax checks logits[0..9] only; logits[10..11] are padding
             S_ARGMAX_CMP: begin
                 if ($signed(logits[argmax_k]) > $signed(logits[result]))
                     result <= argmax_k;

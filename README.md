@@ -4,7 +4,7 @@ Hardware MLP inference accelerator for MNIST digit classification on the Digilen
 
 **Network:** 784 → FC1(64, ReLU) → FC2(32, ReLU) → FC3(10, argmax)  
 **Weights:** INT8 post-training quantization  
-**Throughput:** ~0.40 ms per inference at 100 MHz  
+**Throughput:** ~0.10 ms per inference at 100 MHz (4-neuron parallel MAC engine, 16 DSPs)  
 **Interface:** UART — send a 28×28 image from a PC, receive the predicted class
 
 For architecture details, quantization math, BRAM layout, and firmware design see [docs/design.md](docs/design.md).
@@ -172,7 +172,10 @@ This mirrors `mlp_engine.v` exactly in Python — same INT8 MACs, same requantiz
 
 | Peripheral | Base address | Size |
 |---|---|---|
-| Param BRAM (weights/biases) | `0x40000000` | 64 KB |
+| Param BRAM bank 0 (neurons 0,4,8,…) | `0x40000000` | 16 KB |
+| Param BRAM bank 1 (neurons 1,5,9,…) | `0x40004000` | 16 KB |
+| Param BRAM bank 2 (neurons 2,6,10,…) | `0x40008000` | 16 KB |
+| Param BRAM bank 3 (neurons 3,7,11,…) | `0x4000C000` | 16 KB |
 | Input BRAM (image pixels) | `0x40010000` | 1 KB |
 | MLP AXI-Lite control | `0x40020000` | 4 KB |
 

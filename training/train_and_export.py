@@ -352,57 +352,100 @@ def export_coe(quant: dict):
 
 
 # ── C Header Export ────────────────────────────────────────────────────────────
-def _pack_int8_to_uint32(int8_tensor: torch.Tensor) -> list:
+def _pack_int8_to_uint32(arr: np.ndarray) -> list:
     """
-    Pack a flat int8 tensor into a list of uint32 values (little-endian,
-    4 bytes per word).  Zero-pads to the next 4-byte boundary.
-    Byte order within each word:
-      word[i] = byte[4i+0] | (byte[4i+1]<<8) | (byte[4i+2]<<16) | (byte[4i+3]<<24)
-    byte[4i+0] lands at the lowest BRAM address — matches ARM Cortex-A9
-    little-endian AXI writes.
+    Pack a flat int8 array into uint32 words (little-endian, 4 bytes per word).
+    Zero-pads to the next 4-byte boundary.
     """
-    raw = np.asarray(int8_tensor, dtype=np.int8).flatten().tobytes()
-    pad = (-len(raw)) % 4          # bytes needed to reach next 4-byte boundary
+    raw = np.asarray(arr, dtype=np.int8).flatten().tobytes()
+    pad = (-len(raw)) % 4
     raw += b'\x00' * pad
     return list(struct.unpack(f'<{len(raw) // 4}I', raw))
 
 
+def _split_into_banks(W: np.ndarray, b: np.ndarray, n_banks: int = 4):
+    """
+    Split weight matrix W (n_out, n_in) and bias vector b (n_out,) into
+    n_banks interleaved banks.  Bank k contains rows {k, k+n_banks, ...}.
+    Returns list of n_banks (W_bank, b_bank) tuples, each row-major.
+    """
+    n_out = W.shape[0]
+    banks = []
+    for k in range(n_banks):
+        idx = list(range(k, n_out, n_banks))
+        banks.append((W[idx, :], b[idx]))
+    return banks
+
+
 def export_header(quant: dict, out_dir: str = FIRMWARE_DIR):
     """
-    Write firmware/weights_biases.h.
+    Write firmware/weights_biases.h — 4-bank parallel layout.
 
-    Contains:
-      - Network dimension #defines
-      - uint32_t word-count #defines for each parameter block
-      - BRAM byte-offset #defines (contiguous layout, weights before biases
-        within each layer: fc1_w, fc1_b, fc2_w, fc2_b, fc3_w, fc3_b)
-      - float32 quantization scale arrays
-      - static const uint32_t arrays for every weight matrix and bias vector
-        (INT8 values packed 4-per-word, little-endian, row-major [out, in])
+    The MLP engine computes 4 output neurons simultaneously, each drawing
+    weights from a dedicated BRAM bank.  Bank k holds neurons {k, k+4, k+8, ...}
+    for every layer.  FC3 is padded from 10 to 12 neurons (3 groups of 4);
+    the 2 padding neurons have zero weights and biases and are never reached
+    by the argmax (which checks only logits[0..9]).
 
-    The file is meant to be #included by mlp_bram_init.c only.
+    Per-bank BRAM byte offsets (identical for all 4 banks):
+      FC1_WEIGHT_BANK_OFFSET  0x00000000  16 neurons × 784 B = 12 544 B
+      FC1_BIAS_BANK_OFFSET    0x00003100  16 neurons ×   4 B =    64 B
+      FC2_WEIGHT_BANK_OFFSET  0x00003140   8 neurons ×  64 B =   512 B
+      FC2_BIAS_BANK_OFFSET    0x00003340   8 neurons ×   4 B =    32 B
+      FC3_WEIGHT_BANK_OFFSET  0x00003360   3 neurons ×  32 B =    96 B
+      FC3_BIAS_BANK_OFFSET    0x000033C0   3 neurons ×   4 B =    12 B
+      Total per bank: 13 260 B  (<16 KB)
+
+    The C firmware writes each bank to its own AXI BRAM controller:
+      Bank 0: MLP_PARAM_BRAM_BANK0_BASE (0x40000000)
+      Bank 1: MLP_PARAM_BRAM_BANK1_BASE (0x40004000)
+      Bank 2: MLP_PARAM_BRAM_BANK2_BASE (0x40008000)
+      Bank 3: MLP_PARAM_BRAM_BANK3_BASE (0x4000C000)
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    layer_names = ["fc1", "fc2", "fc3"]
+    N_BANKS    = 4
+    layer_cfg  = [
+        ("fc1", 64,  784),   # (name, n_out, n_in)
+        ("fc2", 32,   64),
+        ("fc3", 10,   32),   # padded to 12 inside the loop
+    ]
 
-    # Pack all tensors into uint32 word lists
-    packed_w = {n: _pack_int8_to_uint32(quant[n]["weight"][0]) for n in layer_names}
-    packed_b = {
-        n: list(np.asarray(quant[n]["bias"][0], dtype=np.int32).astype("<i4").view(np.uint32))
-        for n in layer_names
-    }
+    # ── Per-bank BRAM byte offsets (fixed; must match mlp_engine.v localparams)
+    FC3_PADDED = 12          # 10 real neurons padded to next multiple of 4
+    groups     = {"fc1": 64 // N_BANKS, "fc2": 32 // N_BANKS, "fc3": FC3_PADDED // N_BANKS}
+    n_ins      = {"fc1": 784, "fc2": 64, "fc3": 32}
 
-    # Build contiguous BRAM offset map (bytes)
-    bram_offsets: dict = {}
+    bank_offsets = {}
     cursor = 0
-    for n in layer_names:
-        bram_offsets[f"{n}_weight"] = cursor;  cursor += len(packed_w[n]) * 4
-        bram_offsets[f"{n}_bias"]   = cursor;  cursor += len(packed_b[n]) * 4
-    total_bytes = cursor
+    for name, ng, ni in [("fc1", groups["fc1"], n_ins["fc1"]),
+                          ("fc2", groups["fc2"], n_ins["fc2"]),
+                          ("fc3", groups["fc3"], n_ins["fc3"])]:
+        w_bytes = ng * ni       # ng neurons per bank × ni bytes per neuron
+        b_bytes = ng * 4        # one INT32 per neuron
+        bank_offsets[f"{name}_weight"] = cursor;  cursor += w_bytes
+        bank_offsets[f"{name}_bias"]   = cursor;  cursor += b_bytes
+    bytes_per_bank = cursor
+
+    # ── Build per-bank weight/bias arrays ──────────────────────────────────────
+    packed_w_banks = {}   # {layer: [bank0_words, bank1_words, ...]}
+    packed_b_banks = {}
+
+    for name, n_out, n_in in layer_cfg:
+        W = np.asarray(quant[name]["weight"][0], dtype=np.int8)   # (n_out, n_in)
+        b = np.asarray(quant[name]["bias"][0],   dtype=np.int32)  # (n_out,)
+
+        if name == "fc3":
+            # Pad to FC3_PADDED neurons with zero weights / biases
+            pad_rows = FC3_PADDED - n_out
+            W = np.vstack([W, np.zeros((pad_rows, n_in), dtype=np.int8)])
+            b = np.concatenate([b, np.zeros(pad_rows, dtype=np.int32)])
+
+        banks = _split_into_banks(W, b, N_BANKS)
+        packed_w_banks[name] = [_pack_int8_to_uint32(bW) for bW, _  in banks]
+        packed_b_banks[name] = [list(bb.astype(np.int32))  for _,  bb in banks]
 
     def fmt_array(words: list, cols: int = 8) -> str:
-        """Format uint32 list as indented C hex literals."""
         lines = []
         for i in range(0, len(words), cols):
             chunk = words[i : i + cols]
@@ -416,9 +459,10 @@ def export_header(quant: dict, out_dir: str = FIRMWARE_DIR):
         "/* weights_biases.h — AUTO-GENERATED by train_and_export.py */",
         "/* DO NOT EDIT: re-run train_and_export.py to regenerate.   */",
         "/*                                                           */",
-        "/* INT8 weights/biases packed as uint32_t (little-endian,   */",
-        "/* 4 bytes per word).  Row-major [out_features, in_features] */",
-        "/* for weight matrices.  Zero-padded to 4-byte boundary.    */",
+        "/* 4-bank parallel layout: bank k holds output neurons       */",
+        "/* {k, k+4, k+8, ...} for FC1/FC2/FC3 (FC3 padded to 12).  */",
+        "/* All 4 banks share the same byte-offset map within each    */",
+        "/* bank's 16-KB BRAM window.                                 */",
         "",
         "#ifndef WEIGHTS_BIASES_H",
         "#define WEIGHTS_BIASES_H",
@@ -436,78 +480,78 @@ def export_header(quant: dict, out_dir: str = FIRMWARE_DIR):
         "#define MLP_FC2_OUT    32U",
         "#define MLP_FC3_IN     32U",
         "#define MLP_FC3_OUT    10U",
+        f"#define MLP_FC3_PADDED {FC3_PADDED}U  /* padded to multiple of 4 for engine */",
         "",
     ]
 
-    # ── Array sizes ────────────────────────────────────────────────────────────
-    out += ["/* ── Array sizes (uint32_t words per parameter block) ────────── */"]
-    for n in layer_names:
-        out.append(f"#define {n.upper()}_WEIGHT_WORDS  {len(packed_w[n])}U")
-        out.append(f"#define {n.upper()}_BIAS_WORDS    {len(packed_b[n])}U")
+    # ── Per-bank array sizes ───────────────────────────────────────────────────
+    out += ["/* ── Per-bank array sizes (uint32_t words) ──────────────────── */"]
+    for name, ng, ni in [("fc1", groups["fc1"], n_ins["fc1"]),
+                          ("fc2", groups["fc2"], n_ins["fc2"]),
+                          ("fc3", groups["fc3"], n_ins["fc3"])]:
+        w_words = len(packed_w_banks[name][0])
+        b_words = ng
+        out.append(f"#define {name.upper()}_BANK_WEIGHT_WORDS  {w_words}U"
+                   f"  /* {ng} neurons × {ni // 4} words/neuron */")
+        out.append(f"#define {name.upper()}_BANK_BIAS_WORDS    {b_words}U")
     out.append("")
 
-    # ── BRAM byte offsets ──────────────────────────────────────────────────────
+    # ── Per-bank BRAM byte offsets (same for all 4 banks) ─────────────────────
     out += [
-        "/* ── BRAM byte offsets from MLP_BRAM_BASE_ADDR ─────────────────── */",
-        "/* Set MLP_BRAM_BASE_ADDR in mlp_bram_init.h to match the address  */",
-        "/* assigned to your AXI BRAM Controller in Vivado's Address Editor. */",
+        "/* ── Per-bank BRAM byte offsets (identical for all 4 banks) ─── */",
+        "/* Must match the localparams in mlp_engine.v.                   */",
     ]
-    for n in layer_names:
-        out.append(f"#define {n.upper()}_WEIGHT_BRAM_OFFSET  0x{bram_offsets[f'{n}_weight']:08X}UL")
-        out.append(f"#define {n.upper()}_BIAS_BRAM_OFFSET    0x{bram_offsets[f'{n}_bias']:08X}UL")
-    out.append(f"#define MLP_PARAM_TOTAL_BYTES   {total_bytes}U  /* {total_bytes / 1024:.1f} KB */")
+    for key, offset in bank_offsets.items():
+        layer, kind = key.rsplit("_", 1)
+        out.append(f"#define {layer.upper()}_{kind.upper()}_BANK_OFFSET  0x{offset:08X}UL")
+    out.append(f"#define MLP_PARAM_BYTES_PER_BANK  {bytes_per_bank}U"
+               f"  /* {bytes_per_bank / 1024:.1f} KB */")
     out.append("")
 
-    # ── Scale factors ──────────────────────────────────────────────────────────
-    w_sc = ", ".join(f"{quant[n]['weight'][1]:.8f}f" for n in layer_names)
-    b_sc = ", ".join(f"{quant[n]['bias'][1]:.8f}f"   for n in layer_names)
+    # ── Input normalization and shift constants ────────────────────────────────
+    w_sc = ", ".join(f"{quant[n]['weight'][1]:.8f}f" for n, *_ in layer_cfg)
+    b_sc = ", ".join(f"{quant[n]['bias'][1]:.8f}f"   for n, *_ in layer_cfg)
     out += [
         "/* ── Input normalization constants (MNIST) ───────────────────────── */",
-        "/* PS C code must normalize each uint8 pixel before writing to BRAM: */",
-        "/*   x_float = (pixel / 255.0f - MLP_INPUT_MEAN) / MLP_INPUT_STD     */",
-        "/*   x_int8  = clamp(roundf(x_float / MLP_INPUT_SCALE), -128, 127)   */",
         f"#define MLP_INPUT_MEAN   {INPUT_MEAN:.4f}f",
         f"#define MLP_INPUT_STD    {INPUT_STD:.4f}f",
         f"#define MLP_INPUT_SCALE  {quant['input_scale']:.8f}f",
         "",
         "/* ── Inter-layer requantization right-shifts ─────────────────────── */",
-        "/* RTL applies:  act_int8 = clip(ReLU(acc_int32 >> k), 0, 127)       */",
-        "/* k is computed so that 2^(-k) approximates M_req =                 */",
-        "/*   (w_scale * x_scale) / act_scale                                 */",
-        "/* Without these shifts, every positive FC accumulator (magnitude    */",
-        "/* ~10 000-50 000) clips to 127, collapsing hidden layers to binary. */",
         f"#define MLP_REQ_SHIFT_FC1  {quant['req_shift_fc1']}U",
         f"#define MLP_REQ_SHIFT_FC2  {quant['req_shift_fc2']}U",
         "",
         "/* ── Weight / bias quantization scale factors (fc1, fc2, fc3 order) */",
-        "/* weight_scale[i]: dequantize via  w_float = w_int8 * scale          */",
         f"static const float mlp_weight_scales[3] = {{ {w_sc} }};",
         f"static const float mlp_bias_scales[3]   = {{ {b_sc} }};",
         "",
     ]
 
-    # ── Parameter arrays ───────────────────────────────────────────────────────
-    out.append("/* ── Parameter arrays ────────────────────────────────────────── */")
+    # ── Per-bank parameter arrays ──────────────────────────────────────────────
+    out.append("/* ── Per-bank parameter arrays ───────────────────────────────── */")
     out.append("/* Include this header in exactly ONE .c file (mlp_bram_init.c). */")
     out.append("")
 
-    for n in layer_names:
-        w_shape = quant[n]["weight"][0].shape   # (out, in)
-        b_shape = quant[n]["bias"][0].shape     # (out,)
+    for name, n_out_real, n_in in layer_cfg:
+        n_out_bank = groups[name]
+        for k in range(N_BANKS):
+            w_words = packed_w_banks[name][k]
+            b_words = packed_b_banks[name][k]
+            n_out_padded = FC3_PADDED if name == "fc3" else n_out_real
+            out.append(f"/* {name} bank{k}: neurons {{{k},{k+4},...}} "
+                       f"[{n_out_bank}×{n_in} INT8] → {len(w_words)} words */")
+            out.append(f"static const uint32_t {name}_bank{k}_weights"
+                       f"[{name.upper()}_BANK_WEIGHT_WORDS] = {{")
+            out.append(fmt_array(w_words))
+            out.append("};")
+            out.append("")
 
-        out.append(f"/* {n} weights  [{w_shape[0]}×{w_shape[1]} INT8]"
-                   f"  →  {len(packed_w[n])} uint32_t words */")
-        out.append(f"static const uint32_t {n}_weights[{n.upper()}_WEIGHT_WORDS] = {{")
-        out.append(fmt_array(packed_w[n]))
-        out.append("};")
-        out.append("")
-
-        out.append(f"/* {n} bias  [{b_shape[0]} INT32]"
-                   f"  →  {len(packed_b[n])} uint32_t words */")
-        out.append(f"static const int32_t {n}_bias[{n.upper()}_BIAS_WORDS] = {{")
-        out.append("    " + ", ".join(str(int(v)) for v in np.asarray(quant[n]["bias"][0]).flatten()))
-        out.append("};")
-        out.append("")
+            out.append(f"/* {name} bank{k} biases [{n_out_bank} INT32] */")
+            out.append(f"static const int32_t {name}_bank{k}_bias"
+                       f"[{name.upper()}_BANK_BIAS_WORDS] = {{")
+            out.append("    " + ", ".join(str(int(v)) for v in b_words))
+            out.append("};")
+            out.append("")
 
     out.append("#endif /* WEIGHTS_BIASES_H */")
 
@@ -515,18 +559,16 @@ def export_header(quant: dict, out_dir: str = FIRMWARE_DIR):
     with open(header_path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
 
-    print(f"  Wrote {total_bytes / 1024:.1f} KB params → "
+    print(f"  Wrote 4-bank header ({bytes_per_bank / 1024:.1f} KB/bank × 4 = "
+          f"{bytes_per_bank * 4 / 1024:.1f} KB total) → "
           f"{os.path.relpath(header_path, BASE_DIR)}")
-    print(f"  BRAM layout:")
-    for n in layer_names:
-        print(f"    0x{bram_offsets[f'{n}_weight']:08X}  {n}_weights"
-              f"  ({len(packed_w[n])*4} bytes)")
-        print(f"    0x{bram_offsets[f'{n}_bias']:08X}  {n}_bias"
-              f"  ({len(packed_b[n])*4} bytes)")
-    print(f"    Total: {total_bytes} bytes ({total_bytes/1024:.1f} KB)")
+    print(f"  Per-bank BRAM layout:")
+    for key, offset in bank_offsets.items():
+        layer, kind = key.rsplit("_", 1)
+        sz = (groups[layer] * n_ins[layer]) if kind == "weight" else (groups[layer] * 4)
+        print(f"    0x{offset:08X}  {layer}_{kind}  ({sz} bytes)")
+    print(f"    Total per bank: {bytes_per_bank} bytes ({bytes_per_bank / 1024:.1f} KB)")
 
-    # Also write Verilog parameter header so RTL picks up shifts without
-    # the user having to manually edit mlp_engine.v after each retraining.
     export_verilog_params(quant, out_dir)
 
 
